@@ -1,0 +1,99 @@
+image: docker:git
+services:
+  - docker:dind
+
+stages:
+  - build
+  - test
+  - release
+
+variables:
+  CONTAINER_BUILDER_IMAGE: $CI_REGISTRY_IMAGE/builder:$CI_COMMIT_REF_SLUG
+  CONTAINER_TEST_BUILDER_IMAGE: $CI_REGISTRY_IMAGE/testbuilder:$CI_COMMIT_REF_SLUG
+  CONTAINER_TEST_IMAGE: $CI_REGISTRY_IMAGE/test:$CI_COMMIT_REF_SLUG
+  CONTAINER_SERVER_IMAGE: $CI_REGISTRY_IMAGE/server:$CI_COMMIT_REF_SLUG
+  CONTAINER_TST_IMAGE: $CI_REGISTRY_IMAGE:tst
+  CONTAINER_QAS_IMAGE: $CI_REGISTRY_IMAGE:staging
+  CONTAINER_PRD_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+
+before_script:
+  - docker -v && (echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" "$CI_REGISTRY" --password-stdin) || echo 'Docker not loaded'
+
+build:
+  stage: build
+  script:
+    - docker pull $CONTAINER_BUILDER_IMAGE || true
+    - docker build --cache-from $CONTAINER_BUILDER_IMAGE --build-arg RELATIVE_ROUTE=$RELATIVE_ROUTE -t $CONTAINER_BUILDER_IMAGE --target Builder .
+    - docker push $CONTAINER_BUILDER_IMAGE
+    - docker pull $CONTAINER_TEST_BUILDER_IMAGE || true
+    - docker build --cache-from $CONTAINER_BUILDER_IMAGE,$CONTAINER_TEST_BUILDER_IMAGE --build-arg RELATIVE_ROUTE=$RELATIVE_ROUTE -t $CONTAINER_TEST_BUILDER_IMAGE --target TestBuilder .
+    - docker push $CONTAINER_TEST_BUILDER_IMAGE
+    - docker pull $CONTAINER_TEST_IMAGE || true
+    - docker build --cache-from $CONTAINER_TEST_IMAGE,$CONTAINER_TEST_BUILDER_IMAGE,$CONTAINER_BUILDER_IMAGE --build-arg RELATIVE_ROUTE=$RELATIVE_ROUTE -t $CONTAINER_TEST_IMAGE --target Test .
+    - docker push $CONTAINER_TEST_IMAGE
+    - docker pull $CONTAINER_SERVER_IMAGE || true
+    - docker build --cache-from $CONTAINER_SERVER_IMAGE,$CONTAINER_TEST_IMAGE,$CONTAINER_TEST_BUILDER_IMAGE,$CONTAINER_BUILDER_IMAGE --build-arg RELATIVE_ROUTE=$RELATIVE_ROUTE -t $CONTAINER_SERVER_IMAGE --target Server .
+    - docker push $CONTAINER_SERVER_IMAGE
+
+tests:
+  stage: test
+  image: $CONTAINER_TEST_IMAGE
+  # Add services if needed
+  # services:
+  #   - postgres:9.6
+  variables:
+    HELLO_WORLD: Hello Gitlab!
+  script:
+    - rake test
+
+# You can add additional syntax checks
+# syntax:
+#   stage: test
+#   image: $CONTAINER_IMAGE
+#   script:
+#     - rubocop
+#   allow_failure: true
+#   except:
+#     - tags
+
+# For when a non important test fails
+release_tst_override:
+  stage: test
+  when: manual
+  environment:
+    name: tst
+  script:
+    - docker pull $CONTAINER_SERVER_IMAGE
+    - docker tag $CONTAINER_SERVER_IMAGE $CONTAINER_TST_IMAGE
+    - docker push $CONTAINER_TST_IMAGE
+  allow_failure: true
+  only:
+    - develop
+    - /^feature\//
+
+# the environment variables are for Gitlab https://gitlab.com/**/environments
+# RUBY_ENV is voor in de build onderscheid te maken tussen add_(development_)dependency in de gemspec
+release_staging:
+  stage: release
+  # Optional: define Gitlab environments
+  # environment:
+  #   name: staging
+  #   url: https://my_hello_world_app.be
+  when: manual
+  environment:
+    name: staging
+  script:
+    - docker pull $CONTAINER_SERVER_IMAGE
+    - docker tag $CONTAINER_SERVER_IMAGE $CONTAINER_QAS_IMAGE
+    - docker push $CONTAINER_QAS_IMAGE
+
+release_production:
+  stage: release
+  environment:
+    name: production
+  script:
+    - docker pull $CONTAINER_SERVER_IMAGE
+    - docker tag $CONTAINER_SERVER_IMAGE $CONTAINER_PRD_IMAGE
+    - docker push $CONTAINER_PRD_IMAGE
+  only:
+    - tags
